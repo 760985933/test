@@ -1,0 +1,604 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SSH客户端</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link href="https://cdn.jsdelivr.net/npm/font-awesome@4.7.0/css/font-awesome.min.css" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            primary: '#165DFF',
+            secondary: '#00B42A',
+            danger: '#F53F3F',
+            dark: '#1D2129',
+            light: '#F2F3F5',
+            terminal: '#0A111F',
+          },
+          fontFamily: {
+            inter: ['Inter', 'sans-serif'],
+            mono: ['JetBrains Mono', 'monospace'],
+          },
+        },
+      }
+    }
+  </script>
+  <style type="text/tailwindcss">
+    @layer utilities {
+      .content-auto {
+        content-visibility: auto;
+      }
+      .terminal-cursor {
+        animation: blink 1s step-end infinite;
+      }
+      @keyframes blink {
+        from, to { opacity: 1; }
+        50% { opacity: 0; }
+      }
+      .scrollbar-thin {
+        scrollbar-width: thin;
+      }
+      .scrollbar-thin::-webkit-scrollbar {
+        width: 4px;
+        height: 4px;
+      }
+      .scrollbar-thin::-webkit-scrollbar-thumb {
+        background-color: rgba(255, 255, 255, 0.2);
+        border-radius: 2px;
+      }
+    }
+  </style>
+</head>
+<body class="font-inter bg-gray-50 text-dark min-h-screen flex flex-col">
+  <div id="root" class="flex-grow flex flex-col"></div>
+
+  <script src="https://cdn.jsdelivr.net/npm/react@17.0.2/umd/react.production.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/react-dom@17.0.2/umd/react-dom.production.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/prop-types@15.7.2/prop-types.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/axios@0.21.1/dist/axios.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/js-base64@3.7.5/base64.min.js"></script>
+  
+  <script>
+    const { h, useState, useEffect, useRef, useCallback } = React;
+    const { createRoot } = ReactDOM;
+    
+    // 状态管理
+    const AppContext = React.createContext({});
+    
+    // 连接配置管理
+    function ConnectionManager() {
+      const getConnections = () => {
+        try {
+          const connections = localStorage.getItem('ssh_connections');
+          return connections ? JSON.parse(connections) : [];
+        } catch (error) {
+          console.error('获取连接配置失败:', error);
+          return [];
+        }
+      };
+      
+      const saveConnection = (connection) => {
+        try {
+          const connections = getConnections();
+          const index = connections.findIndex(conn => conn.id === connection.id);
+          
+          if (index !== -1) {
+            connections[index] = connection;
+          } else {
+            connection.id = Date.now().toString();
+            connections.push(connection);
+          }
+          
+          localStorage.setItem('ssh_connections', JSON.stringify(connections));
+          return connection;
+        } catch (error) {
+          console.error('保存连接配置失败:', error);
+          return null;
+        }
+      };
+      
+      const deleteConnection = (id) => {
+        try {
+          const connections = getConnections().filter(conn => conn.id !== id);
+          localStorage.setItem('ssh_connections', JSON.stringify(connections));
+          return true;
+        } catch (error) {
+          console.error('删除连接配置失败:', error);
+          return false;
+        }
+      };
+      
+      return {
+        getConnections,
+        saveConnection,
+        deleteConnection
+      };
+    }
+    
+    // 应用主组件
+    function App() {
+      const [connections, setConnections] = useState([]);
+      const [activeConnection, setActiveConnection] = useState(null);
+      const [terminalOutput, setTerminalOutput] = useState('');
+      const [commandHistory, setCommandHistory] = useState([]);
+      const [historyIndex, setHistoryIndex] = useState(-1);
+      const [currentCommand, setCurrentCommand] = useState('');
+      const [isConnecting, setIsConnecting] = useState(false);
+      const [isConnected, setIsConnected] = useState(false);
+      const terminalRef = useRef(null);
+      const connectionManager = ConnectionManager();
+      
+      // 加载连接配置
+      useEffect(() => {
+        const loadedConnections = connectionManager.getConnections();
+        setConnections(loadedConnections);
+      }, []);
+      
+      // 自动滚动到终端底部
+      useEffect(() => {
+        if (terminalRef.current) {
+          terminalRef.current.scrollTop = terminalRef.current.scrollHeight;
+        }
+      }, [terminalOutput]);
+      
+      // 连接到服务器
+      const connect = async (connection) => {
+        if (isConnecting || isConnected) return;
+        
+        setIsConnecting(true);
+        setActiveConnection(connection);
+        setTerminalOutput('正在连接到 ' + connection.host + ':' + connection.port + '...\n');
+        
+        try {
+          const response = await window.tauri.invoke('connect', {
+            host: connection.host,
+            port: parseInt(connection.port),
+            username: connection.username,
+            password: connection.password,
+            privateKey: connection.privateKey
+          });
+          
+          setTerminalOutput(terminalOutput + response + '\n');
+          setIsConnected(true);
+          setIsConnecting(false);
+        } catch (error) {
+          setTerminalOutput(terminalOutput + '连接失败: ' + error + '\n');
+          setIsConnecting(false);
+          setIsConnected(false);
+        }
+      };
+      
+      // 断开连接
+      const disconnect = async () => {
+        if (!isConnected) return;
+        
+        try {
+          await window.tauri.invoke('disconnect');
+          setTerminalOutput(terminalOutput + '已断开连接\n');
+          setIsConnected(false);
+          setActiveConnection(null);
+        } catch (error) {
+          setTerminalOutput(terminalOutput + '断开连接失败: ' + error + '\n');
+        }
+      };
+      
+      // 执行命令
+      const executeCommand = async (command) => {
+        if (!isConnected || !command.trim()) return;
+        
+        // 更新命令历史
+        const newHistory = [...commandHistory, command];
+        setCommandHistory(newHistory);
+        setHistoryIndex(newHistory.length);
+        setCurrentCommand('');
+        
+        // 添加命令到终端
+        setTerminalOutput(terminalOutput + `\x1B[32m${activeConnection.username}@${activeConnection.host}\x1B[0m:\x1B[34m~\x1B[0m$ ${command}\n`);
+        
+        try {
+          const response = await window.tauri.invoke('execute_command', { command });
+          setTerminalOutput(terminalOutput + response + '\n');
+        } catch (error) {
+          setTerminalOutput(terminalOutput + '执行命令失败: ' + error + '\n');
+        }
+      };
+      
+      // 处理命令输入
+      const handleCommandInput = (e) => {
+        if (e.key === 'Enter') {
+          executeCommand(currentCommand);
+        } else if (e.key === 'ArrowUp') {
+          e.preventDefault();
+          if (historyIndex > 0) {
+            setHistoryIndex(historyIndex - 1);
+            setCurrentCommand(commandHistory[historyIndex - 1]);
+          }
+        } else if (e.key === 'ArrowDown') {
+          e.preventDefault();
+          if (historyIndex < commandHistory.length) {
+            setHistoryIndex(historyIndex + 1);
+            setCurrentCommand(historyIndex === commandHistory.length ? '' : commandHistory[historyIndex]);
+          }
+        }
+      };
+      
+      // 更新连接配置
+      const updateConnection = (connection) => {
+        const updatedConnection = connectionManager.saveConnection(connection);
+        if (updatedConnection) {
+          setConnections(prev => prev.map(conn => conn.id === updatedConnection.id ? updatedConnection : conn));
+          if (activeConnection && activeConnection.id === updatedConnection.id) {
+            setActiveConnection(updatedConnection);
+          }
+          return true;
+        }
+        return false;
+      };
+      
+      // 删除连接配置
+      const removeConnection = (id) => {
+        if (activeConnection && activeConnection.id === id) {
+          disconnect();
+        }
+        
+        if (connectionManager.deleteConnection(id)) {
+          setConnections(prev => prev.filter(conn => conn.id !== id));
+          return true;
+        }
+        return false;
+      };
+      
+      // 创建新连接配置
+      const createConnection = () => {
+        const newConnection = {
+          name: '新连接',
+          host: 'localhost',
+          port: 22,
+          username: 'root',
+          password: '',
+          privateKey: ''
+        };
+        
+        const savedConnection = connectionManager.saveConnection(newConnection);
+        if (savedConnection) {
+          setConnections(prev => [...prev, savedConnection]);
+          return savedConnection;
+        }
+        return null;
+      };
+      
+      return (
+        <AppContext.Provider value={{
+          connections,
+          activeConnection,
+          terminalOutput,
+          currentCommand,
+          setCurrentCommand,
+          isConnecting,
+          isConnected,
+          connect,
+          disconnect,
+          executeCommand,
+          handleCommandInput,
+          updateConnection,
+          removeConnection,
+          createConnection
+        }}>
+          <div className="flex flex-col h-screen">
+            <Header />
+            <div className="flex flex-1 overflow-hidden">
+              <ConnectionList />
+              <div className="flex-1 flex flex-col bg-white border-l border-gray-200">
+                {activeConnection ? (
+                  <ConnectionDetails />
+                ) : (
+                  <div className="flex-1 flex items-center justify-center text-gray-400">
+                    <div className="text-center">
+                      <i className="fa fa-terminal text-5xl mb-4" aria-hidden="true"></i>
+                      <p className="text-lg">选择或创建一个SSH连接</p>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        </AppContext.Provider>
+      );
+    }
+    
+    // 头部组件
+    function Header() {
+      const { isConnected, disconnect } = React.useContext(AppContext);
+      
+      return (
+        <header className="bg-white border-b border-gray-200 px-4 py-3 flex items-center justify-between shadow-sm">
+          <div className="flex items-center space-x-2">
+            <i className="fa fa-server text-primary text-xl" aria-hidden="true"></i>
+            <h1 className="text-xl font-semibold">SSH客户端</h1>
+          </div>
+          {isConnected && (
+            <button 
+              className="bg-danger hover:bg-danger/90 text-white px-4 py-2 rounded-md text-sm flex items-center transition-colors duration-200"
+              onClick={disconnect}
+            >
+              <i className="fa fa-power-off mr-2" aria-hidden="true"></i>
+              断开连接
+            </button>
+          )}
+        </header>
+      );
+    }
+    
+    // 连接列表组件
+    function ConnectionList() {
+      const { 
+        connections, 
+        activeConnection, 
+        connect,
+        createConnection
+      } = React.useContext(AppContext);
+      
+      return (
+        <div className="w-64 bg-gray-50 border-r border-gray-200 flex flex-col h-full">
+          <div className="p-4 border-b border-gray-200">
+            <button 
+              className="w-full bg-primary hover:bg-primary/90 text-white px-4 py-2 rounded-md text-sm flex items-center justify-center transition-colors duration-200"
+              onClick={() => createConnection()}
+            >
+              <i className="fa fa-plus mr-2" aria-hidden="true"></i>
+              新建连接
+            </button>
+          </div>
+          <div className="flex-1 overflow-y-auto scrollbar-thin p-2">
+            {connections.length === 0 ? (
+              <div className="p-4 text-center text-gray-400">
+                暂无连接配置
+              </div>
+            ) : (
+              <ul>
+                {connections.map(connection => (
+                  <li key={connection.id}>
+                    <button 
+                      className={`w-full p-3 rounded-md text-left mb-1 flex items-center justify-between ${
+                        activeConnection && activeConnection.id === connection.id 
+                          ? 'bg-primary/10 text-primary border border-primary/20' 
+                          : 'hover:bg-gray-100'
+                      } transition-colors duration-200`}
+                      onClick={() => connect(connection)}
+                    >
+                      <div className="flex items-center">
+                        <i className="fa fa-link mr-2" aria-hidden="true"></i>
+                        <span>{connection.name}</span>
+                      </div>
+                      <i className="fa fa-angle-right text-xs" aria-hidden="true"></i>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        </div>
+      );
+    }
+    
+    // 连接详情组件
+    function ConnectionDetails() {
+      const { 
+        activeConnection, 
+        updateConnection,
+        removeConnection,
+        isConnected,
+        isConnecting
+      } = React.useContext(AppContext);
+      const [editing, setEditing] = React.useState(false);
+      const [connection, setConnection] = React.useState({...activeConnection});
+      
+      const handleInputChange = (e) => {
+        const { name, value } = e.target;
+        setConnection(prev => ({
+          ...prev,
+          [name]: value
+        }));
+      };
+      
+      const handleSave = () => {
+        if (updateConnection(connection)) {
+          setEditing(false);
+        }
+      };
+      
+      const handleDelete = () => {
+        if (window.confirm(`确定要删除连接 "${connection.name}" 吗？`)) {
+          removeConnection(connection.id);
+        }
+      };
+      
+      return (
+        <div className="flex flex-col h-full">
+          <div className="p-4 border-b border-gray-200 flex justify-between items-center">
+            <div className="flex items-center">
+              <i className="fa fa-server text-primary mr-2" aria-hidden="true"></i>
+              <h2 className="font-medium">
+                {editing ? (
+                  <input 
+                    type="text" 
+                    name="name" 
+                    value={connection.name} 
+                    onChange={handleInputChange}
+                    className="border border-gray-300 rounded-md px-2 py-1 w-48 focus:outline-none focus:ring-2 focus:ring-primary/50"
+                  />
+                ) : (
+                  connection.name
+                )}
+              </h2>
+              {isConnected && (
+                <span className="ml-2 px-2 py-0.5 bg-secondary/20 text-secondary text-xs rounded-full">
+                  已连接
+                </span>
+              )}
+              {isConnecting && (
+                <span className="ml-2 px-2 py-0.5 bg-primary/20 text-primary text-xs rounded-full flex items-center">
+                  <i className="fa fa-circle-o-notch fa-spin mr-1" aria-hidden="true"></i>
+                  连接中
+                </span>
+              )}
+            </div>
+            <div className="flex space-x-2">
+              {editing ? (
+                <>
+                  <button 
+                    className="px-3 py-1 text-sm bg-gray-100 hover:bg-gray-200 rounded-md transition-colors duration-200"
+                    onClick={() => setConnection({...activeConnection}) || setEditing(false)}
+                  >
+                    取消
+                  </button>
+                  <button 
+                    className="px-3 py-1 text-sm bg-primary hover:bg-primary/90 text-white rounded-md transition-colors duration-200"
+                    onClick={handleSave}
+                  >
+                    保存
+                  </button>
+                </>
+              ) : (
+                <>
+                  <button 
+                    className="px-3 py-1 text-sm bg-gray-100 hover:bg-gray-200 rounded-md transition-colors duration-200"
+                    onClick={() => setEditing(true)}
+                  >
+                    <i className="fa fa-pencil mr-1" aria-hidden="true"></i>
+                    编辑
+                  </button>
+                  <button 
+                    className="px-3 py-1 text-sm bg-gray-100 hover:bg-gray-200 rounded-md transition-colors duration-200"
+                    onClick={handleDelete}
+                  >
+                    <i className="fa fa-trash mr-1" aria-hidden="true"></i>
+                    删除
+                  </button>
+                </>
+              )}
+            </div>
+          </div>
+          
+          {editing && (
+            <div className="p-4 border-b border-gray-200 bg-gray-50">
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">主机</label>
+                  <input 
+                    type="text" 
+                    name="host" 
+                    value={connection.host} 
+                    onChange={handleInputChange}
+                    className="w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary/50"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">端口</label>
+                  <input 
+                    type="number" 
+                    name="port" 
+                    value={connection.port} 
+                    onChange={handleInputChange}
+                    className="w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary/50"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">用户名</label>
+                  <input 
+                    type="text" 
+                    name="username" 
+                    value={connection.username} 
+                    onChange={handleInputChange}
+                    className="w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary/50"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">密码</label>
+                  <input 
+                    type="password" 
+                    name="password" 
+                    value={connection.password} 
+                    onChange={handleInputChange}
+                    className="w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary/50"
+                  />
+                </div>
+                <div className="col-span-2">
+                  <label className="block text-sm font-medium text-gray-700 mb-1">私钥 (可选)</label>
+                  <textarea 
+                    name="privateKey" 
+                    value={connection.privateKey} 
+                    onChange={handleInputChange}
+                    rows="3"
+                    className="w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary/50"
+                  ></textarea>
+                </div>
+              </div>
+            </div>
+          )}
+          
+          <Terminal />
+        </div>
+      );
+    }
+    
+    // 终端组件
+    function Terminal() {
+      const { 
+        terminalOutput, 
+        currentCommand, 
+        setCurrentCommand,
+        handleCommandInput,
+        isConnected,
+        activeConnection
+      } = React.useContext(AppContext);
+      
+      return (
+        <div className="flex-1 flex flex-col bg-terminal text-gray-100 font-mono rounded-t-lg overflow-hidden">
+          <div ref={terminalRef} className="flex-1 overflow-y-auto p-4 scrollbar-thin">
+            <pre className="whitespace-pre-wrap break-words text-sm">{terminalOutput}</pre>
+            {isConnected && activeConnection && (
+              <div className="flex items-center mt-2">
+                <span className="text-green-400">{activeConnection.username}@</span>
+                <span className="text-blue-400">{activeConnection.host}</span>
+                <span className="text-gray-300">:</span>
+                <span className="text-blue-400">~</span>
+                <span className="text-gray-300">$</span>
+                <span className="ml-2">{currentCommand}</span>
+                <span className="ml-1 terminal-cursor">|</span>
+              </div>
+            )}
+          </div>
+          {isConnected && (
+            <div className="p-2 border-t border-gray-700 bg-terminal/80">
+              <div className="flex items-center">
+                <span className="text-green-400 mr-1">{activeConnection.username}@</span>
+                <span className="text-blue-400 mr-1">{activeConnection.host}</span>
+                <span className="text-gray-300 mr-1">:</span>
+                <span className="text-blue-400 mr-1">~</span>
+                <span className="text-gray-300 mr-2">$</span>
+                <input
+                  type="text"
+                  value={currentCommand}
+                  onChange={(e) => setCurrentCommand(e.target.value)}
+                  onKeyDown={handleCommandInput}
+                  className="flex-1 bg-transparent border-none outline-none text-gray-100 font-mono"
+                  placeholder="输入命令..."
+                />
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    }
+    
+    // 渲染应用
+    const root = createRoot(document.getElementById('root'));
+    root.render(h(App));
+  </script>
+</body>
+</html>    
